@@ -37,10 +37,15 @@ static DoubleOption  opt_var_decay         (_cat, "var-decay",   "The variable a
 static DoubleOption  opt_clause_decay      (_cat, "cla-decay",   "The clause activity decay factor",              0.999,    DoubleRange(0, false, 1, false));
 static DoubleOption  opt_random_var_freq   (_cat, "rnd-freq",    "The frequency with which the decision heuristic tries to choose a random variable", 0, DoubleRange(0, true, 1, true));
 static DoubleOption  opt_random_seed       (_cat, "rnd-seed",    "Used by the random variable selection",         91648253, DoubleRange(0, false, HUGE_VAL, false));
+static DoubleOption  opt_uip_target        (_cat, "i-uip-init",    "Used by the random variable selection",         1.25);
 static IntOption     opt_ccmin_mode        (_cat, "ccmin-mode",  "Controls conflict clause minimization (0=none, 1=basic, 2=deep)", 2, IntRange(0, 2));
 static IntOption     opt_phase_saving      (_cat, "phase-saving", "Controls the level of phase saving (0=none, 1=limited, 2=full)", 2, IntRange(0, 2));
 static BoolOption    opt_rnd_init_act      (_cat, "rnd-init",    "Randomize the initial activity", false);
 static BoolOption    opt_luby_restart      (_cat, "luby",        "Use the Luby restart sequence", true);
+static BoolOption    opt_smart_learn       (_cat, "smart-learn",        "use smart uip target learning", false);
+static BoolOption    opt_all_uip           (_cat, "all-uip",        "Use all UIP learning", false);
+static BoolOption    opt_i_uip             (_cat, "i-uip",        "Use greedy i-UIP learning", false);
+static BoolOption    opt_all_dec           (_cat, "all-dec",        "Use all Decision learning", false);
 static IntOption     opt_restart_first     (_cat, "rfirst",      "The base restart interval", 100, IntRange(1, INT32_MAX));
 static DoubleOption  opt_restart_inc       (_cat, "rinc",        "Restart interval increase factor", 2, DoubleRange(1, false, HUGE_VAL, false));
 static DoubleOption  opt_garbage_frac      (_cat, "gc-frac",     "The fraction of wasted memory allowed before a garbage collection is triggered",  0.20, DoubleRange(0, false, HUGE_VAL, false));
@@ -60,7 +65,12 @@ Solver::Solver() :
   , clause_decay     (opt_clause_decay)
   , random_var_freq  (opt_random_var_freq)
   , random_seed      (opt_random_seed)
+  , uip_target       (opt_uip_target)
   , luby_restart     (opt_luby_restart)
+  , i_uip            (opt_i_uip)
+  , all_uip          (opt_all_uip)
+  , all_dec          (opt_all_dec)
+  , smart_learn      (opt_smart_learn)
   , ccmin_mode       (opt_ccmin_mode)
   , phase_saving     (opt_phase_saving)
   , rnd_pol          (false)
@@ -101,6 +111,7 @@ Solver::Solver() :
   , conflict_budget    (-1)
   , propagation_budget (-1)
   , asynch_interrupt   (false)
+  , i_uip_index         (1)
 {}
 
 
@@ -300,9 +311,294 @@ void Solver::analyze(CRef confl, vec<Lit>& out_learnt, int& out_btlevel)
 
     // Generate conflict clause:
     //
-    out_learnt.push();      // (leave room for the asserting literal)
     int index   = trail.size() - 1;
 
+
+    //if we decide to go with all_dec
+    if (all_dec){
+        do{
+            if(confl == CRef_Undef){
+                out_learnt.push(~p);
+            }else{
+                Clause& c = ca[confl];
+
+                if (c.learnt())
+                    claBumpActivity(c);
+
+                for (int j = (p == lit_Undef) ? 0 : 1; j < c.size(); j++){
+                    Lit q = c[j];
+
+                    if (!seen[var(q)] && level(var(q)) > 0){
+                        varBumpActivity(var(q));
+                        seen[var(q)] = 1;
+                    }
+                }
+            }
+            
+            // Select next clause to look at:
+            while (!seen[var(trail[index--])]){
+                if (index < 0){
+                    break;
+                }
+            }
+            p     = trail[index+1];
+            confl = reason(var(p));
+            seen[var(p)] = 0;
+
+        }while (index >= 0);
+    max_literals += out_learnt.size();
+    tot_literals += out_learnt.size();
+    }
+
+
+    //if go with all uip
+    else if (all_uip){
+        int pathCollection[decisionLevel()] ={};
+        pathCollection[decisionLevel() -1] =1;
+        int current_decision_level = decisionLevel();
+        do{
+            do{
+                assert(confl != CRef_Undef);
+                Clause& c = ca[confl];
+
+                if (c.learnt())
+                    claBumpActivity(c);
+
+                for (int j = (p == lit_Undef) ? 0 : 1; j < c.size(); j++){
+                    Lit q = c[j];
+
+                    if (!seen[var(q)] && level(var(q)) > 0){
+                        varBumpActivity(var(q));
+                        seen[var(q)] = 1;
+                        pathCollection[level(var(q))-1]++ ;
+                    }
+                }
+                
+                // Select next clause to look at:
+                while (!seen[var(trail[index--])]);
+                p     = trail[index+1];
+                confl = reason(var(p));
+                seen[var(p)] = 0;
+                pathCollection[current_decision_level-1]--;
+            }while (pathCollection[current_decision_level-1] > 1);
+            out_learnt.push(~p);
+            pathCollection[current_decision_level-1]--;
+            current_decision_level--;
+            //now look for the next clause at a different decision level
+            index --;
+            p = trail[index+1];
+            confl = reason(var(p));
+            while (level(var(p)) > current_decision_level || !(seen[var(p)]) 
+                ||  pathCollection[level(var(p))-1] <= 1){
+                if (pathCollection[current_decision_level-1] == 0){
+                    current_decision_level--;
+                    continue;
+                }
+                if ((seen[var(p)])  && pathCollection[level(var(p))-1] == 1){
+                    out_learnt.push(~p);
+                    pathCollection[level(var(p))-1]--;
+                    seen[var(p)] = 0;
+                    current_decision_level = level(var(p))-1;
+                }
+                if (index < 0 ){
+                    break;
+                }
+                index--;
+                p     = trail[index+1];
+                confl = reason(var(p));
+            } 
+            if (level(var(p)) < current_decision_level){ 
+                current_decision_level = level(var(p));
+            }
+            //we have found a clause at the next available decision level
+            seen[var(p)] = 0;
+
+        }while(current_decision_level > 0 && index >= 0);
+
+    max_literals += out_learnt.size();
+    tot_literals += out_learnt.size();
+    }
+    //if decide to use customized greedy i-uip
+    else if (i_uip){
+        int resolved = 0;
+        int new_resolved = 0;
+        int introduced = 0;
+        int net_old = 0;
+        int net_new =0;
+        int original_size = 0;
+        vec<Lit>    unresolved_literals;
+        unresolved_literals.clear();
+        //decide when to stop uip for the current iteration
+        int uip_level = decisionLevel() - i_uip_index;
+        uip_level = uip_level > 0 ? uip_level : 0; 
+        int pathCollection[decisionLevel()] ={};
+        int LBD_collection[decisionLevel()] ={};
+        pathCollection[decisionLevel() -1] =1;
+        int current_decision_level = decisionLevel();
+        do{
+            introduced = 0;
+            new_resolved= 0;
+            net_old = net_new;
+            do{
+                assert(confl != CRef_Undef);
+                Clause& c = ca[confl];
+
+                if (c.learnt())
+                    claBumpActivity(c);
+
+                for (int j = (p == lit_Undef) ? 0 : 1; j < c.size(); j++){
+                    Lit q = c[j];
+
+                    if (!seen[var(q)] && level(var(q)) > 0){
+                        varBumpActivity(var(q));
+                        seen[var(q)] = 1;
+                        introduced+=1;
+                        //only uip to a certain level
+                        if (level(var(q)) > uip_level){
+                            pathCollection[level(var(q))-1]++ ;
+                        }
+                        else{
+                            unresolved_literals.push(q);
+                            LBD_collection[level(var(q))-1] =1;
+                        }
+                    }
+                }
+              
+                // Select next clause to look at:
+                while (!seen[var(trail[index--])]);
+                p     = trail[index+1];
+                confl = reason(var(p));
+                seen[var(p)] = 0;
+                new_resolved++;
+                pathCollection[current_decision_level-1]--;
+            }while (pathCollection[current_decision_level-1] > 1);
+            resolved += new_resolved;
+            net_new = introduced - new_resolved+1;
+            out_learnt.push(~p);
+            //record 1-UIP status
+            if (current_decision_level == decisionLevel()){
+                original_size = net_new;
+                net_old = net_new;
+            }
+            pathCollection[current_decision_level-1]--;
+            current_decision_level--;
+            //now look for the next clause at a different decision level
+            index --;
+            p = trail[index+1];
+            confl = reason(var(p));
+            while (level(var(p)) > current_decision_level || !(seen[var(p)]) 
+                ||  pathCollection[level(var(p))-1] <= 1){
+                if (level(var(p)) <= uip_level){
+                    break;
+                }
+                if (pathCollection[current_decision_level-1] == 0){
+                    current_decision_level--;
+                    continue;
+                }
+                if ((seen[var(p)])  && pathCollection[level(var(p))-1] == 1){
+                    out_learnt.push(~p);
+                    pathCollection[level(var(p))-1]--;
+                    seen[var(p)] = 0;
+                    current_decision_level = level(var(p))-1;
+                }
+                if (index < 0 ){
+                    break;
+                }
+                index--;
+                p     = trail[index+1];
+                confl = reason(var(p));
+            } 
+            if (level(var(p)) < current_decision_level){ 
+                current_decision_level = level(var(p));
+            }
+            //we have found a clause at the next available decision level
+            seen[var(p)] = 0;
+
+        }while(current_decision_level > uip_level && index >= 0);
+    
+    int LBD = out_learnt.size();
+    //add unsolved literals
+    for (int j=0; j < unresolved_literals.size(); j++){
+        out_learnt.push(unresolved_literals[j]);
+    }
+    unresolved_literals.clear();
+    for (int i =0; i<= uip_level -1; i++ ){
+        LBD += LBD_collection[i];
+    } 
+    double cl_score =  (double) out_learnt.size() / (double )LBD;
+    i_uip_index += ((cl_score > uip_target) ? 1 : -1); 
+    if (i_uip_index < 1)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
+        i_uip_index = 1;
+    
+    //if use smart update rule for uip target
+    double net_resolution_efficiency = (double)(out_learnt.size()- original_size) / (double) resolved; 
+    if(smart_learn){
+        double delta_efficiency = (double)(net_new) / (double) ( LBD * new_resolved) ;
+        double expected_change = delta_efficiency * ((double) resolved / (double) i_uip_index);
+        double update_value = cl_score +expected_change;
+        if (expected_change > 10){
+            expected_change = 10;
+        }
+        if ( update_value < 1 ){
+                update_value = 1;
+        }
+        uip_target = uip_target * 0.9 + update_value * 0.1;
+    }else{
+        //use static direction based update rule
+        double current_resolution_efficiency =  (double)(net_new - net_old) / (double) new_resolved;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     
+        if (current_resolution_efficiency > net_resolution_efficiency){
+            uip_target+=0.05;
+            
+            if (uip_target > 10){
+                uip_target = 10;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
+            }
+        
+        }else if (current_resolution_efficiency < net_resolution_efficiency ){
+            uip_target-= 0.015;
+
+            if ( uip_target < 1){
+                uip_target = 1;
+            }
+        }
+    }
+    //printf("(%d,%f, %f)", i_uip_index, uip_target, cl_score);
+
+    unresolved_literals.clear();
+    // Simplify conflict clause:
+    //
+    int i, j;
+    out_learnt.copyTo(analyze_toclear);
+    if (ccmin_mode == 2){
+        for (i = j = 1; i < out_learnt.size(); i++)
+            if (reason(var(out_learnt[i])) == CRef_Undef || !litRedundant(out_learnt[i]))
+                out_learnt[j++] = out_learnt[i];
+        
+    }else if (ccmin_mode == 1){
+        for (i = j = 1; i < out_learnt.size(); i++){
+            Var x = var(out_learnt[i]);
+
+            if (reason(x) == CRef_Undef)
+                out_learnt[j++] = out_learnt[i];
+            else{
+                Clause& c = ca[reason(var(out_learnt[i]))];
+                for (int k = 1; k < c.size(); k++)
+                    if (!seen[var(c[k])] && level(var(c[k])) > 0){
+                        out_learnt[j++] = out_learnt[i];
+                        break; }
+            }
+        }
+    }else
+        i = j = out_learnt.size();
+
+    max_literals += out_learnt.size();
+    out_learnt.shrink(i - j);
+    tot_literals += out_learnt.size();
+    }
+
+
+    //if going with 1-UIP
+    else{       
+    out_learnt.push();      // (leave room for the asserting literal)
     do{
         assert(confl != CRef_Undef); // (otherwise should be UIP)
         Clause& c = ca[confl];
@@ -362,6 +658,7 @@ void Solver::analyze(CRef confl, vec<Lit>& out_learnt, int& out_btlevel)
     max_literals += out_learnt.size();
     out_learnt.shrink(i - j);
     tot_literals += out_learnt.size();
+    }
 
     // Find correct backtrack level:
     //

@@ -130,7 +130,12 @@ public:
     double    clause_decay;
     double    random_var_freq;
     double    random_seed;
+    double    uip_target;
     bool      luby_restart;
+    bool      all_uip;
+    bool      i_uip;
+    bool      all_dec;
+    bool      smart_learn;
     int       ccmin_mode;         // Controls conflict clause minimization (0=none, 1=basic, 2=deep).
     int       phase_saving;       // Controls the level of phase saving (0=none, 1=limited, 2=full).
     bool      rnd_pol;            // Use random polarities for branching heuristics.
@@ -229,6 +234,7 @@ protected:
     double              max_learnts;
     double              learntsize_adjust_confl;
     int                 learntsize_adjust_cnt;
+    int                 i_uip_index;
 
     // Resource contraints:
     //
