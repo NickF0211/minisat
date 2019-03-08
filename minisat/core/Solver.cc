@@ -43,6 +43,8 @@ static IntOption     opt_phase_saving      (_cat, "phase-saving", "Controls the 
 static BoolOption    opt_rnd_init_act      (_cat, "rnd-init",    "Randomize the initial activity", false);
 static BoolOption    opt_luby_restart      (_cat, "luby",        "Use the Luby restart sequence", true);
 static BoolOption    opt_smart_learn       (_cat, "smart-learn",        "use smart uip target learning", false);
+static BoolOption    opt_static_target     (_cat, "static-target",        "use static uip target ", false);
+static BoolOption    opt_cost_eff          (_cat, "cost-eff",        "use cost eff learning scheme ", false);
 static BoolOption    opt_all_uip           (_cat, "all-uip",        "Use all UIP learning", false);
 static BoolOption    opt_i_uip             (_cat, "i-uip",        "Use greedy i-UIP learning", false);
 static BoolOption    opt_all_dec           (_cat, "all-dec",        "Use all Decision learning", false);
@@ -70,6 +72,8 @@ Solver::Solver() :
   , i_uip            (opt_i_uip)
   , all_uip          (opt_all_uip)
   , all_dec          (opt_all_dec)
+  , static_target    (opt_static_target)
+  , cost_eff         (opt_cost_eff)
   , smart_learn      (opt_smart_learn)
   , ccmin_mode       (opt_ccmin_mode)
   , phase_saving     (opt_phase_saving)
@@ -112,6 +116,10 @@ Solver::Solver() :
   , propagation_budget (-1)
   , asynch_interrupt   (false)
   , i_uip_index         (1)
+  , avg_net_eff         (0.0)
+  , avg_res_level       (0.0)
+  , avg_res_steps       (0.0)
+  , avg_decision_level  (0.0)
 {}
 
 
@@ -426,6 +434,7 @@ void Solver::analyze(CRef confl, vec<Lit>& out_learnt, int& out_btlevel)
         int net_old = 0;
         int net_new =0;
         int original_size = 0;
+        int first_resolved = 0;
         vec<Lit>    unresolved_literals;
         unresolved_literals.clear();
         //decide when to stop uip for the current iteration
@@ -479,6 +488,7 @@ void Solver::analyze(CRef confl, vec<Lit>& out_learnt, int& out_btlevel)
             if (current_decision_level == decisionLevel()){
                 original_size = net_new;
                 net_old = net_new;
+                first_resolved= resolved;
             }
             pathCollection[current_decision_level-1]--;
             current_decision_level--;
@@ -499,6 +509,7 @@ void Solver::analyze(CRef confl, vec<Lit>& out_learnt, int& out_btlevel)
                     out_learnt.push(~p);
                     pathCollection[level(var(p))-1]--;
                     seen[var(p)] = 0;
+                    net_new = 0;
                     current_decision_level = level(var(p))-1;
                 }
                 if (index < 0 ){
@@ -526,12 +537,33 @@ void Solver::analyze(CRef confl, vec<Lit>& out_learnt, int& out_btlevel)
         LBD += LBD_collection[i];
     } 
     double cl_score =  (double) out_learnt.size() / (double )LBD;
-    i_uip_index += ((cl_score > uip_target) ? 1 : -1); 
-    if (i_uip_index < 1)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
-        i_uip_index = 1;
+    if (!static_target || !cost_eff){
+        i_uip_index += ((cl_score > uip_target) ? 1 : -1); 
+        if (i_uip_index < 1)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
+            i_uip_index = 1;
+    }
     
-    //if use smart update rule for uip target
     double net_resolution_efficiency = (double)(out_learnt.size()- original_size) / (double) resolved; 
+    //update averages
+    if (avg_res_level == 0){
+        avg_res_level = i_uip_index;
+        avg_res_steps = resolved;
+        avg_decision_level = decisionLevel();
+    }else{
+        int valid_level = (i_uip_index > decisionLevel()) ? decisionLevel() : i_uip_index;
+        avg_res_level = avg_res_level * 0.9 + (valid_level) * 0.1;
+        avg_res_steps = avg_res_steps * 0.9 + resolved * 0.1;
+        avg_decision_level= avg_decision_level * 0.9 + decisionLevel() * 0.1;
+    }
+    if(resolved > new_resolved){
+        if (avg_net_eff == 0){
+            avg_net_eff = net_resolution_efficiency;
+        }else{
+            avg_net_eff = avg_net_eff * 0.9 + net_resolution_efficiency *0.1;
+        } 
+    }
+
+    //if use smart update rule for uip target
     if(smart_learn){
         double delta_efficiency = (double)(net_new) / (double) ( LBD * new_resolved) ;
         double expected_change = delta_efficiency * ((double) resolved / (double) i_uip_index);
@@ -539,29 +571,85 @@ void Solver::analyze(CRef confl, vec<Lit>& out_learnt, int& out_btlevel)
         if (expected_change > 10){
             expected_change = 10;
         }
-        if ( update_value < 1 ){
+        if ( update_value < 1 ){    
                 update_value = 1;
         }
         uip_target = uip_target * 0.9 + update_value * 0.1;
-    }else{
-        //use static direction based update rule
-        double current_resolution_efficiency =  (double)(net_new - net_old) / (double) new_resolved;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     
-        if (current_resolution_efficiency > net_resolution_efficiency){
-            uip_target+=0.05;
-            
-            if (uip_target > 10){
-                uip_target = 10;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
+    }else if(static_target){
+        if(resolved > new_resolved){
+        double net_resolution_efficiency = (double)(out_learnt.size()- original_size) / (double) (resolved);
+        if (avg_net_eff != 0){
+                double extra_steps = (out_learnt.size() - LBD) / (-avg_net_eff);
+                double avg_res_per_level = avg_res_steps / avg_res_level;
+                int extra_level = extra_steps / (avg_res_per_level);
+                double step_ahead = resolved - avg_res_steps;
+                double level_ahead = step_ahead/ avg_res_per_level;
+                //allow max 10 levels ahead
+                int level_allowed = avg_decision_level / 10 - level_ahead;
+                extra_level = extra_level > level_allowed ? level_allowed :  extra_level; 
+                if (extra_level > 2)
+                    extra_level = 2;
+                if (extra_steps == 0){
+                    i_uip_index -=1;
+                }else{
+                     i_uip_index += extra_level;
+                }
             }
-        
-        }else if (current_resolution_efficiency < net_resolution_efficiency ){
-            uip_target-= 0.015;
+        }else{
+           i_uip_index += ((cl_score > uip_target) ? 1 : -1); 
+        }
+        if (i_uip_index < 1 ){
+            i_uip_index = 1;
+        }
+    }else if(cost_eff)
+        {
+            double extra_steps = (out_learnt.size() - LBD) / (-avg_net_eff);
+            double expected_size_improvement= avg_net_eff * avg_res_steps / avg_res_level;
+            double expected_runtime_improvement = 0.0;
+            if (out_learnt.size() + expected_size_improvement > LBD){
+                expected_runtime_improvement =  log((double)(out_learnt.size() + expected_size_improvement) / (double)out_learnt.size());                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       
+            }else{
+                expected_runtime_improvement =  log(1/cl_score);                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       
+            }
+            double total_gain = expected_runtime_improvement * (propagations / conflicts) / out_learnt.size() ; 
+            if (avg_net_eff == 0){
+                i_uip_index += ((cl_score > uip_target) ? 1 : -1); 
+            }
+            else if ( -total_gain > avg_res_steps / avg_res_level){
+                i_uip_index+=1;
+            }else{
+                i_uip_index-=1;
+            }
 
-            if ( uip_target < 1){
-                uip_target = 1;
+            if (i_uip_index < 1 ){
+                i_uip_index = 1;
             }
         }
+    else{
+            double current_resolution_efficiency =  0.0;
+            if (resolved > new_resolved){
+                current_resolution_efficiency =  (double)(net_new) / (double) new_resolved;
+            
+                if (current_resolution_efficiency > net_resolution_efficiency){
+                    uip_target+=0.05;
+                    
+                    if (uip_target > 10){
+                        uip_target = 10;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
+                    }
+                
+                }else if (current_resolution_efficiency < net_resolution_efficiency ){
+                    uip_target-= 0.015;
+
+                    if ( uip_target < 1){
+                        uip_target = 1;
+                    }
+                }
+            }   
+        
+
+        
     }
-    //printf("(%d,%f, %f)", i_uip_index, uip_target, cl_score);
+    //printf("(level: %d, target: %f, score: %f)\n", i_uip_index, uip_target, cl_score);
 
     unresolved_literals.clear();
     // Simplify conflict clause:
@@ -1163,6 +1251,14 @@ lbool Solver::solve_()
         status = search(rest_base * restart_first);
         if (!withinBudget()) break;
         curr_restarts++;
+        if (i_uip && curr_restarts % 20 == 0){
+            avg_net_eff = 0;
+            avg_res_level =0;
+            avg_res_steps =0;
+            avg_decision_level =0;
+
+        }
+
     }
 
     if (verbosity >= 1)

@@ -131,11 +131,17 @@ public:
     double    random_var_freq;
     double    random_seed;
     double    uip_target;
+    double    avg_net_eff;
+    double    avg_res_steps;
+    double    avg_res_level;
+    double    avg_decision_level;
     bool      luby_restart;
     bool      all_uip;
     bool      i_uip;
     bool      all_dec;
     bool      smart_learn;
+    bool      static_target;
+    bool      cost_eff;
     int       ccmin_mode;         // Controls conflict clause minimization (0=none, 1=basic, 2=deep).
     int       phase_saving;       // Controls the level of phase saving (0=none, 1=limited, 2=full).
     bool      rnd_pol;            // Use random polarities for branching heuristics.
